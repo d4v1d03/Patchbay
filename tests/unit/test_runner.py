@@ -1,12 +1,10 @@
-"""run_session with fakes: FakeLLM, FakeSandbox, fake Redis, temp SQLite."""
-
-from dockhand.agent.loop import Limits
-from dockhand.agent.runner import run_session
-from dockhand.db.engine import db_session
-from dockhand.db.models import Message, Session
-from dockhand.events import EV_DIFF, EV_SANDBOX_READY, EV_STATUS, EV_TOOL_CALL, EV_USAGE
-from dockhand.llm import FakeLLM
-from dockhand.sandbox import FakeSandbox
+from patchbay.agent.loop import Limits
+from patchbay.db.engine import db_session
+from patchbay.db.models import Message, Session
+from patchbay.events import EV_DIFF, EV_SANDBOX_READY, EV_STATUS, EV_TOOL_CALL, EV_USAGE
+from patchbay.jobs.runner import run_session
+from patchbay.llm import FakeLLM
+from patchbay.sandbox import FakeSandbox
 
 
 def _session(prompt="do it", repo_url=None):
@@ -79,6 +77,7 @@ def test_follow_up_resumes_transcript_and_reuses_container(bus):
                 session_id=sid, seq=n, role="user", payload={"role": "user", "content": "sqlite"}
             )
         )
+        s.status = "queued"  # what POST /messages does before enqueuing
 
     second = FakeLLM.script(FakeLLM.tool_call("finish", summary="done with sqlite"))
     factory = _factory(sb)
@@ -144,3 +143,119 @@ def test_max_steps_and_missing_session(bus):
         run_session("s_nope", llm=llm, bus=bus, sandbox_factory=_factory(FakeSandbox()))
         == "missing"
     )
+
+
+def test_stale_redelivery_of_a_finished_session_is_ignored(bus):
+    """Celery redelivers after its visibility timeout; a session that is already
+    finished (and has no new user message) must not be run again."""
+    sid = _session()
+    with db_session() as db:
+        db.get(Session, sid).status = "completed"
+    llm = FakeLLM.script(FakeLLM.tool_call("finish", summary="should not run"))
+    assert run_session(sid, llm=llm, bus=bus, sandbox_factory=_factory(FakeSandbox())) == "stale"
+    assert llm.requests == []
+
+
+def test_lease_is_renewed_while_the_run_is_alive(bus, monkeypatch):
+    from patchbay.jobs import runner as runner_mod
+
+    renewed = []
+    real_renew = bus.renew_lock
+    monkeypatch.setattr(
+        bus,
+        "renew_lock",
+        lambda sid, owner, ttl=None: (renewed.append(owner), real_renew(sid, owner, ttl))[1],
+    )
+    monkeypatch.setattr(
+        runner_mod, "_renew_lease", lambda b, sid, owner, stop: b.renew_lock(sid, owner)
+    )
+    sid = _session()
+    llm = FakeLLM.script(FakeLLM.tool_call("finish", summary="done"))
+    assert (
+        run_session(sid, llm=llm, bus=bus, sandbox_factory=_factory(FakeSandbox())) == "completed"
+    )
+    assert renewed  # the heartbeat ran at least once
+
+
+def test_resume_after_crash_repairs_the_transcript_before_calling_the_model(bus):
+    """A worker died between saving an assistant tool call and saving its result."""
+    from patchbay.agent.loop import INTERRUPTED_NOTE
+
+    sid = _session()
+    crash_shaped = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "do it"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_x",
+                    "type": "function",
+                    "function": {"name": "write_file", "arguments": "{}"},
+                }
+            ],
+        },
+    ]
+    with db_session() as db:
+        for i, m in enumerate(crash_shaped):
+            db.add(Message(session_id=sid, seq=i, role=m["role"], payload=m))
+        db.get(Session, sid).status = "queued"  # what the sweeper does
+    llm = FakeLLM.script(FakeLLM.tool_call("finish", summary="checked and done"))
+    assert (
+        run_session(sid, llm=llm, bus=bus, sandbox_factory=_factory(FakeSandbox())) == "completed"
+    )
+    sent = llm.requests[0]["messages"]
+    assert sent[-1] == {"role": "tool", "tool_call_id": "call_x", "content": INTERRUPTED_NOTE}
+    with db_session() as db:
+        s = db.get(Session, sid)
+        assert [m.seq for m in s.messages] == list(range(len(s.messages)))
+        assert s.messages[3].payload["tool_call_id"] == "call_x"
+
+
+def test_usage_is_recorded_per_turn_so_a_hard_crash_does_not_lose_it(bus):
+    """A process being torn down skips the end-of-run bookkeeping; spend must
+    already be on the row (it counts against the session's token budget)."""
+
+    class Crash(BaseException):
+        pass
+
+    class DiesOnThirdCall:
+        model = "fake"
+
+        def __init__(self):
+            self.inner = FakeLLM.script(*[FakeLLM.tool_call("bash", command="ls")] * 2)
+            self.n = 0
+
+        def chat(self, messages, tools=None):
+            self.n += 1
+            if self.n == 3:
+                raise Crash()
+            return self.inner.chat(messages, tools)
+
+    sid = _session()
+    try:
+        run_session(sid, llm=DiesOnThirdCall(), bus=bus, sandbox_factory=_factory(FakeSandbox()))
+    except Crash:
+        pass
+    with db_session() as db:
+        s = db.get(Session, sid)
+        assert s.steps == 2 and s.prompt_tokens == 20 and s.completion_tokens == 10
+        assert s.status == "running"  # left for the sweeper, as a dead worker would
+    assert bus.acquire_lock(sid, "next-worker")  # lease released by finally
+
+
+def test_the_project_is_saved_as_a_zip_when_a_run_ends(bus, projects_dir):
+    import io
+    import zipfile
+
+    sid = _session("make it")
+    sb = FakeSandbox()
+    llm = FakeLLM.script(
+        FakeLLM.tool_call("write_file", path="src/app.js", content="export {}\n"),
+        FakeLLM.tool_call("write_file", path="node_modules/x/index.js", content="lib"),
+        FakeLLM.tool_call("finish", summary="done"),
+    )
+    assert run_session(sid, llm=llm, bus=bus, sandbox_factory=_factory(sb)) == "completed"
+    names = zipfile.ZipFile(io.BytesIO((projects_dir / f"{sid}.zip").read_bytes())).namelist()
+    assert names == [f"{sid}/src/app.js"]

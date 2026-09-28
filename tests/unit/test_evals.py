@@ -1,5 +1,3 @@
-"""Pure parts of the eval harness: task loading, pass rules, report maths."""
-
 import json
 
 from evals.prices import cost_usd
@@ -30,7 +28,10 @@ def test_pass_rules():
 
 
 def test_cost_table():
-    assert cost_usd("deepseek-chat", 1_000_000, 0) == 0.27
+    assert cost_usd("deepseek-flash", 1_000_000, 0) == 0.15
+    # a fully cached prompt costs 2% of an uncached one on deepseek-flash
+    assert cost_usd("deepseek-flash", 1_000_000, 0, 1_000_000) == 0.003
+    assert cost_usd("deepseek-chat", 1_000_000, 0) == 0.15  # legacy alias
     assert (
         abs(cost_usd("gemini-3.8-flash", 1_000_000, 1_000_000, 500_000) - (0.15 + 0.0375 + 2.5))
         < 1e-9
@@ -65,3 +66,62 @@ def test_summarise_pass_at_1_and_k_and_infra_exclusion():
     assert t["pass@1"] == 0.25 and t["trials"] == 4
     assert abs(s["a"]["cached%"] - 20.0) < 1e-9
     json.dumps(s)  # serialisable
+
+
+def test_compare_totals_use_shared_tasks_only(capsys):
+    from evals.report import print_compare
+
+    def run(tag, rows):
+        return {
+            "tag": tag,
+            "results": [
+                {
+                    "task": t,
+                    "trial": 1,
+                    "model": "m",
+                    "prompt_version": "v",
+                    "status": "completed",
+                    "passed": True,
+                    "steps": steps,
+                    "tool_calls": steps,
+                    "prompt_tokens": tok,
+                    "completion_tokens": 0,
+                    "cached_tokens": 0,
+                    "cost_usd": 0.0,
+                    "seconds": 1.0,
+                    "check_exit": 0,
+                    "infra_error": False,
+                    "error": None,
+                    "summary": None,
+                    "run_id": None,
+                }
+                for t, steps, tok in rows
+            ],
+        }
+
+    a = run("a", [("short", 2, 1000)])
+    b = run("b", [("short", 2, 1000), ("long", 20, 90000)])  # b has an extra, expensive task
+    print_compare(a, b)
+    out = capsys.readouterr().out
+    assert "excluded: long" in out
+    tokens_row = next(line for line in out.splitlines() if line.startswith("ALL tokens"))
+    assert tokens_row.split()[-1] == "+0%"  # not skewed by the task only b ran
+
+
+def test_wilson_interval_is_honest_at_small_n():
+    from evals.report import wilson
+
+    lo, hi = wilson(3, 3)
+    assert hi == 1.0 and lo < 0.45  # 3/3 is compatible with a true rate well under 50%
+    lo, hi = wilson(95, 100)
+    assert 0.88 < lo < 0.95 < hi < 0.99
+    assert wilson(0, 0) == (0.0, 1.0)
+
+
+def test_seed_commits_setup_files_as_the_baseline():
+    from patchbay.sandbox import FakeSandbox
+
+    sb = FakeSandbox()
+    Task(name="x", prompt="p", setup={"a.py": "x = 1\n"}).seed(sb)
+    assert sb.read_file("a.py") == "x = 1\n"
+    assert any("git add -A" in c and "commit" in c for c in sb.commands)

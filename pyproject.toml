@@ -1,5 +1,5 @@
 [project]
-name = "dockhand"
+name = "patchbay"
 version = "0.1.0"
 description = "Self-hosted AI coding agent that writes and tests code inside Docker sandboxes"
 readme = "README.md"
@@ -28,8 +28,8 @@ dev = [
 ]
 
 [tool.uv]
-# Dockhand is an application, not a library: don't build/install it as a
-# package, just run it from the repo root (which puts `dockhand/` on sys.path).
+# Patchbay is an application, not a library: don't build/install it as a
+# package, just run it from the repo root (which puts `patchbay/` on sys.path).
 package = false
 
 [tool.pytest.ini_options]

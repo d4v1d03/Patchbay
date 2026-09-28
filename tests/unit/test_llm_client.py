@@ -1,16 +1,13 @@
-"""Types, response parsing (provider quirks), and the FakeLLM script."""
-
 import json
 from types import SimpleNamespace
 
 import pytest
 
-from dockhand.llm import AssistantTurn, FakeLLM, ToolCall, Usage, tool_result_message
-from dockhand.llm.client import LLMConfigError, OpenAICompatibleClient, parse_response
+from patchbay.llm import AssistantTurn, FakeLLM, ToolCall, Usage, tool_result_message
+from patchbay.llm.client import LLMConfigError, OpenAICompatibleClient, parse_response
 
 
 def _response(*, content=None, tool_calls=None, usage=None, reasoning=None, finish="stop"):
-    """Build an object shaped like the SDK's ChatCompletion, without the SDK."""
     message = SimpleNamespace(content=content, tool_calls=tool_calls or [])
     if reasoning is not None:
         message.reasoning_content = reasoning

@@ -1,11 +1,9 @@
-"""Unit-test fixtures: a temp SQLite database and an in-memory Redis."""
-
 import fakeredis
 import pytest
 
-from dockhand.config import get_settings
-from dockhand.db import engine as engine_mod
-from dockhand.events import bus as bus_mod
+from patchbay.config import get_settings
+from patchbay.db import engine as engine_mod
+from patchbay.events import bus as bus_mod
 
 
 @pytest.fixture
@@ -25,3 +23,11 @@ def bus(db):
     bus_mod.set_bus(b)
     yield b
     bus_mod.set_bus(None)
+
+
+@pytest.fixture(autouse=True)
+def projects_dir(tmp_path, monkeypatch):
+    from patchbay.jobs import runner
+
+    monkeypatch.setattr(runner, "PROJECTS_DIR", tmp_path / "projects")
+    return tmp_path / "projects"

@@ -1,5 +1,0 @@
-name: ambiguous_should_ask
-kind: empty
-prompt: |
-  Set up the database layer for our app.
-expect: ask_user

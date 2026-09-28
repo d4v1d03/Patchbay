@@ -1,12 +1,9 @@
-"""FakeSandbox must behave like the real one where it matters, and the pure
-helpers in manager.py (tar packing, path resolution) are tested here too."""
-
 import io
 import tarfile
 
 import pytest
 
-from dockhand.sandbox import (
+from patchbay.sandbox import (
     ExecResult,
     FakeSandbox,
     SandboxFileNotFound,
@@ -14,7 +11,7 @@ from dockhand.sandbox import (
     SandboxProtocol,
     resolve_path,
 )
-from dockhand.sandbox.manager import AGENT_UID, make_tar
+from patchbay.sandbox.manager import AGENT_UID, make_tar
 
 
 def test_fake_satisfies_protocol():
@@ -85,7 +82,7 @@ def test_make_tar_single_member_owned_by_agent():
 
 
 def test_parse_numstat_counts_and_skips_binary():
-    from dockhand.sandbox import parse_numstat
+    from patchbay.sandbox import parse_numstat
 
     out = "12\t3\tsrc/app.py\n-\t-\tlogo.png\n0\t7\told.txt\n"
     assert parse_numstat(out) == {"files": 3, "insertions": 12, "deletions": 10}

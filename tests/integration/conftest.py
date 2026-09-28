@@ -4,7 +4,7 @@ hasn't been built, so `pytest` stays green on a laptop without Docker."""
 
 import pytest
 
-from dockhand.config import get_settings
+from patchbay.config import get_settings
 
 
 def _docker_ready() -> tuple[bool, str]:

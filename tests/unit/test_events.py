@@ -1,6 +1,6 @@
-from dockhand.db.engine import db_session
-from dockhand.db.models import Session
-from dockhand.events import EV_STATUS, EV_TOOL_CALL
+from patchbay.db.engine import db_session
+from patchbay.db.models import Session
+from patchbay.events import EV_STATUS, EV_TOOL_CALL
 
 
 def _session():

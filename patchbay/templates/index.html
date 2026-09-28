@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}Patchbay — a coding agent that works in its own sandbox{% endblock %}
+
+{% block scripts %}
+<script>
+  for (const b of document.querySelectorAll("[data-delete]")) {
+    b.onclick = async () => {
+      if (!confirm("Delete this session and its sandbox?")) return;
+      const r = await fetch(`/api/sessions/${b.dataset.delete}`, { method: "DELETE" });
+      if (r.ok) b.closest("li").remove(); else alert(`could not delete (${r.status})`);
+    };
+  }
+</script>
+{% endblock %}
+
+{% block content %}
+<section class="hero">
+  <p class="eyebrow">Self-hosted coding agent</p>
+  <h1>Hand it a task.<br>Get back code that passes its tests.</h1>
+  <p class="lede">
+    Patchbay clones your repo into a sandbox of its own, makes the change, runs
+    the tests until they pass, and streams every command to your browser while
+    it works. Bring any OpenAI-compatible model.
+  </p>
+  <div class="hero-actions">
+    <a class="btn btn-primary" href="#try">Start a session</a>
+    <a class="btn" href="#how">How it works</a>
+  </div>
+  <p class="config-line">
+    {{ settings.llm_model or "no model configured" }} · prompt {{ settings.prompt_version }}
+    · thinking {{ settings.llm_thinking or "provider default" }}
+    · reviewer {{ "on" if settings.verify_rounds else "off" }}
+  </p>
+</section>
+
+<section class="run-preview" aria-label="An example run">
+  <div class="run-head">
+    <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span>React library app, MVC · empty workspace</span>
+  </div>
+  <ol class="run-lines">
+    <li><span class="k">write_file</span> package.json, vite.config.js, index.html</li>
+    <li><span class="k">write_file</span> src/models/Book.js, Member.js, Library.js</li>
+    <li><span class="k">write_file</span> src/controllers/LibraryController.js</li>
+    <li><span class="k">write_file</span> src/views/BookList.jsx, AddBookForm.jsx, AddMemberForm.jsx</li>
+    <li><span class="k">bash</span> npm install</li>
+    <li><span class="k">bash</span> npm test <span class="ok">19 passed</span></li>
+    <li><span class="k">bash</span> npm run build <span class="ok">built in 371ms</span></li>
+    <li><span class="k">review</span> <span class="ok">approved</span></li>
+  </ol>
+  <div class="run-foot">completed · 11 steps · 77 s · about one cent</div>
+</section>
+
+<section class="stats" aria-label="Measured results">
+  <div><strong>−32%</strong><span>tokens per task after the prompt was reworked, same pass rate</span></div>
+  <div><strong>88%</strong><span>of a new session's first request served from the provider's cache</span></div>
+  <div><strong>−20%</strong><span>cost with model thinking off, same pass rate</span></div>
+  <div><strong>20 / 20</strong><span>planted bugs caught by the reviewer, 0 wrong rejections</span></div>
+  <a class="stats-src" href="https://github.com/d4v1d03/Patchbay/blob/main/docs/EVALS.md">Measured on the eval suite, with hidden tests →</a>
+</section>
+
+<section class="section">
+  <p class="eyebrow">What it does</p>
+  <h2 class="section-title">A sandbox, a loop, and checks on both ends</h2>
+  <div class="features">
+    <article>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5M12 12v10"/></svg>
+      <h3>Dedicated sandbox</h3>
+      <p>Each session gets its own container with your repo cloned in: non-root, every Linux capability dropped, CPU, memory and process limits. Nothing runs on your machine.</p>
+    </article>
+    <article>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>
+      <h3>Tested before it's done</h3>
+      <p>It runs the tests after each change and only finishes once they pass. The summary names the command it ran and what came back.</p>
+    </article>
+    <article>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg>
+      <h3>Second-opinion review</h3>
+      <p>Optionally, a separate model call reads the diff and the test output before a run is accepted, and sends the work back with specific issues.</p>
+    </article>
+    <article>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+      <h3>Every step visible</h3>
+      <p>Commands and their output stream to your browser as they run. Open any step to see the exact prompt the model was given.</p>
+    </article>
+    <article>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></svg>
+      <h3>Cache-aware context</h3>
+      <p>A fixed prompt prefix lets the provider cache most of each request, so a long session costs a fraction of its raw token count. Old tool output can be trimmed when a session runs long.</p>
+    </article>
+    <article>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 21v-5h5"/></svg>
+      <h3>Picks up where it left off</h3>
+      <p>Follow-ups continue in the same sandbox with the whole conversation. If a worker dies mid-run, the run resumes from its saved transcript.</p>
+    </article>
+  </div>
+</section>
+
+<section class="section" id="how">
+  <p class="eyebrow">How it works</p>
+  <h2 class="section-title">From a sentence to a patch</h2>
+  <ol class="how">
+    <li><span class="how-n">01</span><h3>Describe</h3><p>Write the task in plain English and, if you like, point it at a public GitHub repo.</p></li>
+    <li><span class="how-n">02</span><h3>Sandbox</h3><p>A fresh container starts and the repo is cloned into it.</p></li>
+    <li><span class="how-n">03</span><h3>Work</h3><p>The agent reads, edits and runs the tests, fixing what fails, while you watch.</p></li>
+    <li><span class="how-n">04</span><h3>Take it</h3><p>Review the diff, then download it as a patch or the whole project as a zip.</p></li>
+  </ol>
+</section>
+
+<section class="section" id="try">
+  <p class="eyebrow">Try it</p>
+  <h2 class="section-title">Start a session</h2>
+  <div class="card">
+    <form class="task-form" method="post" action="/api/sessions">
+      <label>
+        <span>Task</span>
+        <textarea name="prompt" rows="5" required
+          placeholder="e.g. Add a --version flag to the CLI and write a test for it."></textarea>
+      </label>
+      <label>
+        <span>Repository URL <em class="muted">(optional, public https)</em></span>
+        <input type="url" name="repo_url" placeholder="https://github.com/owner/repo">
+      </label>
+      <div class="form-row">
+        <span class="pill pill-neutral" title="Set LLM_MODEL in .env">
+          {{ settings.llm_model or "no model configured" }}
+        </span>
+        <button type="submit" class="btn btn-primary">Start session</button>
+      </div>
+    </form>
+  </div>
+</section>
+
+<section class="card" id="sessions">
+  <h2>Recent sessions</h2>
+  {% if sessions %}
+    <ul class="session-list">
+      {% for s in sessions %}
+        <li>
+          <div class="session-row">
+            <a href="/sessions/{{ s.id }}">{{ s.title }}</a>
+            <span class="muted small">{{ s.model }} · {{ s.steps }} steps · {{ s.created_at[:16].replace("T", " ") }}</span>
+          </div>
+          <span>
+            <span class="pill pill-{{ s.status }}">{{ s.status }}</span>
+            <button class="btn btn-small" data-delete="{{ s.id }}" title="Delete session" type="button">✕</button>
+          </span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="empty">No sessions yet.</p>
+  {% endif %}
+</section>
+
+<section class="section" id="status">
+  <svg class="sprite" aria-hidden="true"><symbol id="i-box" viewBox="0 0 24 24"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5M12 12v10"/></symbol><symbol id="i-loop" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 21v-5h5"/></symbol><symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path d="M6 3v12M18 9a9 9 0 0 1-9 9"/></symbol><symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol><symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol><symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 15v-4M12 15V8M17 15v-7"/></symbol><symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></symbol><symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6z"/><path d="m9 12 2 2 4-4"/></symbol><symbol id="i-buoy" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="m5.6 5.6 3.6 3.6M14.8 14.8l3.6 3.6M14.8 9.2l3.6-3.6M5.6 18.4l3.6-3.6"/></symbol><symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></symbol><symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="19" r="3"/><circle cx="18" cy="5" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/></symbol><symbol id="i-pair" viewBox="0 0 24 24"><rect x="3" y="3" width="11" height="11" rx="2"/><rect x="10" y="10" width="11" height="11" rx="2"/></symbol><symbol id="i-list" viewBox="0 0 24 24"><path d="M10 6h11M10 12h11M10 18h11"/><path d="m3 6 1.5 1.5L7 5M3 12l1.5 1.5L7 11M3 18l1.5 1.5L7 17"/></symbol><symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol><symbol id="i-tree" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="5" rx="1"/><rect x="2" y="17" width="6" height="5" rx="1"/><rect x="16" y="17" width="6" height="5" rx="1"/><path d="M12 7v5M5 17v-3h14v3"/></symbol><symbol id="i-browser" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><path d="m10 13 4 2.5-4 2.5z"/></symbol><symbol id="i-timer" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/></symbol><symbol id="i-pr" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v6M18 15V9a3 3 0 0 0-3-3h-4"/><path d="m13 3-2 3 2 3"/></symbol><symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0zM12 18v4"/></symbol><symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol><symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol><symbol id="i-check" viewBox="0 0 24 24"><path d="m6 12.5 4 4 8-9"/></symbol></svg>
+  <p class="eyebrow">Status</p>
+  <h2 class="section-title">What's built, and what's next</h2>
+  <div class="track" role="img" aria-label="Version track: v1 shipped, v1.1 next, then v1.2 and v2">
+    <div class="track-line"><span></span></div>
+    <div class="track-node done"><svg class="node-ico" aria-hidden="true"><use href="#i-check"/></svg><b>v1</b><small>shipped · 10</small></div>
+    <div class="track-node next"><svg class="node-ico" aria-hidden="true"><use href="#i-cpu"/></svg><b>v1.1</b><small>models · next up</small></div>
+    <div class="track-node"><svg class="node-ico" aria-hidden="true"><use href="#i-db"/></svg><b>v1.2</b><small>context and agents</small></div>
+    <div class="track-node"><svg class="node-ico" aria-hidden="true"><use href="#i-bolt"/></svg><b>v2</b><small>autonomy</small></div>
+  </div>
+  <div class="track-cards">
+    <div class="done">Sandbox · agent loop · evals · reviewer · crash recovery · live stream · and more</div>
+    <div class="next">Model router · cross-model review · planning step</div>
+    <div>Repo memory · sub-agents · browser QA</div>
+    <div>Triggers · pull requests · MCP · microVMs</div>
+  </div>
+  <div class="matrix">
+    <div class="mx-head"><span></span><span>Capability</span><span>Status</span><span>Proof</span></div>
+    <div class="mx-group"><span class="ver ver-ok">v1</span>Shipped</div>
+    <div class="mx-row"><svg class="ico" aria-hidden="true"><use href="#i-box"/></svg><b>Sandbox per session</b><span class="mx-status"><span class="tick"><svg class="tick-ico" aria-hidden="true"><use href="#i-check"/></svg></span>shipped</span><span class="mx-proof">non-root, all capabilities dropped, CPU, memory and process limits</span></div>
+    <div class="mx-row"><svg class="ico" aria-hidden="true"><use href="#i-loop"/></svg><b>Tool-calling agent loop</b><span class="mx-status"><span class="tick"><svg class="tick-ico" aria-hidden="true"><use href="#i-check"/></svg></span>shipped</span><span class="mx-proof">8 tools; built a tested React app in 11 steps and 77 s</span></div>
+    <div class="mx-row"><svg class="ico" aria-hidden="true"><use href="#i-branch"/></svg><b>Your repo in, a patch or zip out</b><span class="mx-status"><span class="tick"><svg class="tick-ico" aria-hidden="true"><use href="#i-check"/></svg></span>shipped</span><span class="mx-proof">diff against the session's start, even after the agent commits</span></div>
+    <div class="mx-row"><svg class="ico" aria-hidden="true"><use href="#i-pulse"/></svg><b>Live event stream</b><span class="mx-status"><span class="tick"><svg class="tick-ico" aria-hidden="true"><use href="#i-check"/></svg></span>shipped</span><span class="mx-proof">Redis Streams and SSE; no gaps after a web replica was killed</span></div>
+    <div class="mx-row"><svg class="ico" aria-hidden="true"><use href="#i-eye"/></svg><b>Prompt tracing</b><span class="mx-status"><span class="tick"><svg class="tick-ico" aria-hidden="true"><use href="#i-check"/></svg></span>shipped</span><span class="mx-proof">every model call logged with the exact prompt it saw</span></div>
+    <div class="mx-row"><svg class="ico" aria-hidden="true"><use href="#i-chart"/></svg><b>Eval suite</b><span class="mx-status"><span class="tick"><svg class="tick-ico" aria-hidden="true"><use href="#i-check"/></svg></span>shipped</span><span class="mx-proof">hidden tests and 95% intervals; about 450 runs for under $1</span></div>
+    <div class="mx-row"><svg class="ico" aria-hidden="true"><use href="#i-layers"/></svg><b>Cache-aware context</b><span class="mx-status"><span class="tick"><svg class="tick-ico" aria-hidden="true"><use href="#i-check"/></svg></span>shipped</span><span class="mx-proof">88% of a new session's first request served from cache</span></div>
+    <div class="mx-row"><svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg><b>LLM-as-judge reviewer</b><span class="mx-status"><span class="tick"><svg class="tick-ico" aria-hidden="true"><use href="#i-check"/></svg></span>shipped</span><span class="mx-proof">20/20 planted bugs caught, 42/42 correct results approved</span></div>
+    <div class="mx-row"><svg class="ico" aria-hidden="true"><use href="#i-buoy"/></svg><b>Crash recovery</b><span class="mx-status"><span class="tick"><svg class="tick-ico" aria-hidden="true"><use href="#i-check"/></svg></span>shipped</span><span class="mx-proof">worker killed mid-run; the run resumed and finished</span></div>
+    <div class="mx-row"><svg class="ico" aria-hidden="true"><use href="#i-cpu"/></svg><b>Any OpenAI-compatible model</b><span class="mx-status"><span class="tick"><svg class="tick-ico" aria-hidden="true"><use href="#i-check"/></svg></span>shipped</span><span class="mx-proof">thinking off measured 20% cheaper at the same pass rate</span></div>
+    <div class="mx-group"><span class="ver ver-next">v1.1</span>Models</div>
+    <div class="mx-row planned"><svg class="ico" aria-hidden="true"><use href="#i-route"/></svg><b>Model router</b><span class="mx-status"><span class="ring"></span><span class="ver ver-next">v1.1</span></span><span class="mx-proof">a model per role, failover between providers</span></div>
+    <div class="mx-row planned"><svg class="ico" aria-hidden="true"><use href="#i-pair"/></svg><b>Cross-model review</b><span class="mx-status"><span class="ring"></span><span class="ver ver-next">v1.1</span></span><span class="mx-proof">the reviewer from a different lab than the agent</span></div>
+    <div class="mx-row planned"><svg class="ico" aria-hidden="true"><use href="#i-list"/></svg><b>Planning step</b><span class="mx-status"><span class="ring"></span><span class="ver ver-next">v1.1</span></span><span class="mx-proof">a structured plan, challenged by a critic model</span></div>
+    <div class="mx-group"><span class="ver ver-next">v1.2</span>Context and agents</div>
+    <div class="mx-row planned"><svg class="ico" aria-hidden="true"><use href="#i-db"/></svg><b>Repo memory</b><span class="mx-status"><span class="ring"></span><span class="ver ver-next">v1.2</span></span><span class="mx-proof">what it learns about a repo carries over</span></div>
+    <div class="mx-row planned"><svg class="ico" aria-hidden="true"><use href="#i-tree"/></svg><b>Parallel sub-agents</b><span class="mx-status"><span class="ring"></span><span class="ver ver-next">v1.2</span></span><span class="mx-proof">explore and build in parallel, each with its own context</span></div>
+    <div class="mx-row planned"><svg class="ico" aria-hidden="true"><use href="#i-browser"/></svg><b>Browser QA</b><span class="mx-status"><span class="ring"></span><span class="ver ver-next">v1.2</span></span><span class="mx-proof">clicks through the running app and keeps a recording</span></div>
+    <div class="mx-group"><span class="ver ver-next">v2</span>Autonomy and infrastructure</div>
+    <div class="mx-row planned"><svg class="ico" aria-hidden="true"><use href="#i-timer"/></svg><b>Triggered sessions</b><span class="mx-status"><span class="ring"></span><span class="ver ver-next">v2</span></span><span class="mx-proof">from a schedule, a webhook or an alert</span></div>
+    <div class="mx-row planned"><svg class="ico" aria-hidden="true"><use href="#i-pr"/></svg><b>Pull requests</b><span class="mx-status"><span class="ring"></span><span class="ver ver-next">v2</span></span><span class="mx-proof">opened through a GitHub App</span></div>
+    <div class="mx-row planned"><svg class="ico" aria-hidden="true"><use href="#i-plug"/></svg><b>Integrations over MCP</b><span class="mx-status"><span class="ring"></span><span class="ver ver-next">v2</span></span><span class="mx-proof">Slack, Linear, Sentry</span></div>
+    <div class="mx-row planned"><svg class="ico" aria-hidden="true"><use href="#i-server"/></svg><b>MicroVM sandboxes</b><span class="mx-status"><span class="ring"></span><span class="ver ver-next">v2</span></span><span class="mx-proof">run the full stack, not only the code</span></div>
+  </div>
+</section>
+{% endblock %}

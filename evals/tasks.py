@@ -1,11 +1,11 @@
-"""Task definitions: one YAML per task in evals/tasks/."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+from patchbay.sandbox import SandboxProtocol
 
 TASKS_DIR = Path(__file__).resolve().parent / "tasks"
 
@@ -27,6 +27,16 @@ class Task:
     def from_yaml(cls, path: Path) -> Task:
         data = yaml.safe_load(path.read_text())
         return cls(**data)
+
+    def seed(self, sandbox: SandboxProtocol) -> None:
+        for path, content in self.setup.items():
+            sandbox.write_file(path, content)
+        if self.setup:  # committed, so the diff shows only what the agent changed
+            sandbox.exec(
+                "git add -A && git -c user.name=eval -c user.email=eval@localhost "
+                "commit -qm setup && git update-ref refs/patchbay/base HEAD",
+                timeout_s=30,
+            )
 
     def passed(self, status: str, check_exit: int | None) -> bool:
         if self.expect == "ask_user":

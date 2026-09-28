@@ -16,6 +16,24 @@ from pathlib import Path
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson interval for k passes out of n. Unlike p ± 1.96·sqrt(p(1-p)/n)
+    it stays inside [0, 1] and is sensible at small n: 3/3 is 44–100%.
+    """
+    if n == 0:
+        return 0.0, 1.0
+    p = k / n
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def pass_with_ci(k: int, n: int) -> str:
+    lo, hi = wilson(k, n)
+    return f"{k}/{n} ({lo:.0%}–{hi:.0%})"
+
+
 def load(ref: str) -> dict:
     p = Path(ref)
     if p.exists():
@@ -27,7 +45,6 @@ def load(ref: str) -> dict:
 
 
 def summarise(payload: dict) -> dict[str, dict]:
-    """Per task: pass@1 (mean over trials), pass@k (any trial), means of the rest."""
     by_task: dict[str, list[dict]] = defaultdict(list)
     for r in payload["results"]:
         by_task[r["task"]].append(r)
@@ -37,12 +54,17 @@ def summarise(payload: dict) -> dict[str, dict]:
         n = len(real)
         costs = [r["cost_usd"] for r in real if r["cost_usd"] is not None]
         out[task] = {
+            "passed": sum(r["passed"] for r in real),
+            "runs": n,
             "trials": len(rs),
             "infra_errors": sum(r["infra_error"] for r in rs),
             "pass@1": sum(r["passed"] for r in real) / n,
             "pass@k": float(any(r["passed"] for r in real)),
             "steps": sum(r["steps"] for r in real) / n,
             "tokens": sum(r["prompt_tokens"] + r["completion_tokens"] for r in real) / n,
+            "reasoning": sum(r.get("reasoning_tokens", 0) for r in real) / n,
+            "rejections": sum(sum(not v["approve"] for v in r.get("reviews", [])) for r in real)
+            / n,
             "cached%": 100
             * sum(r["cached_tokens"] for r in real)
             / max(1, sum(r["prompt_tokens"] for r in real)),
@@ -56,12 +78,16 @@ def totals(s: dict[str, dict]) -> dict:
     n = len(s) or 1
     costs = [v["cost"] for v in s.values() if v["cost"] is not None]
     return {
+        "passed": sum(v["passed"] for v in s.values()),
+        "runs": sum(v["runs"] for v in s.values()),
         "trials": sum(v["trials"] for v in s.values()),
         "infra_errors": sum(v["infra_errors"] for v in s.values()),
         "pass@1": sum(v["pass@1"] for v in s.values()) / n,
         "pass@k": sum(v["pass@k"] for v in s.values()) / n,
         "steps": sum(v["steps"] for v in s.values()) / n,
         "tokens": sum(v["tokens"] for v in s.values()) / n,
+        "reasoning": sum(v["reasoning"] for v in s.values()) / n,
+        "rejections": sum(v["rejections"] for v in s.values()) / n,
         "cached%": sum(v["cached%"] for v in s.values()) / n,
         "cost": sum(costs) / len(costs) if costs else None,
         "seconds": sum(v["seconds"] for v in s.values()) / n,
@@ -93,12 +119,20 @@ def print_report(payload: dict) -> None:
     for task, v in s.items():
         print(fmt_row(task, v))
     print("-" * len(HEADER))
-    print(fmt_row("ALL", totals(s)))
+    t = totals(s)
+    print(fmt_row("ALL", t))
+    print("\npass rate with 95% confidence interval (the true rate is plausibly in this range):")
+    for task, v in s.items():
+        print(f"  {task:<22} {pass_with_ci(v['passed'], v['runs'])}")
+    print(f"  {'ALL':<22} {pass_with_ci(t['passed'], t['runs'])}")
 
 
 def print_compare(a: dict, b: dict) -> None:
     sa, sb = summarise(a), summarise(b)
-    ta, tb = totals(sa), totals(sb)
+    common = sorted(set(sa) & set(sb))
+    # totals over shared tasks only: different task sets would compare different things
+    ta = totals({t: sa[t] for t in common})
+    tb = totals({t: sb[t] for t in common})
     print(f"{'':<22} {a['tag']:>16} {b['tag']:>16} {'delta':>10}")
     for task in sorted(set(sa) | set(sb)):
         va, vb = sa.get(task), sb.get(task)
@@ -107,10 +141,15 @@ def print_compare(a: dict, b: dict) -> None:
         d = f"{(vb['pass@1'] - va['pass@1']):+.0%}" if va and vb else ""
         print(f"{task:<22} {pa:>16} {pb:>16} {d:>10}")
     print("-" * 68)
+    only = sorted(set(sa) ^ set(sb))
+    if only:
+        print(f"ALL rows cover the {len(common)} shared task(s); excluded: {', '.join(only)}")
     for key, fmt in [
         ("pass@1", "{:.0%}"),
         ("steps", "{:.1f}"),
         ("tokens", "{:.0f}"),
+        ("reasoning", "{:.0f}"),
+        ("rejections", "{:.2f}"),
         ("cost", "${:.4f}"),
         ("seconds", "{:.0f}s"),
     ]:
@@ -121,6 +160,9 @@ def print_compare(a: dict, b: dict) -> None:
         if xa not in (None, 0) and xb is not None:
             d = f"{(xb - xa) / xa:+.0%}"
         print(f"{'ALL ' + key:<22} {fa:>16} {fb:>16} {d:>10}")
+        if key == "pass@1":
+            ca, cb = pass_with_ci(ta["passed"], ta["runs"]), pass_with_ci(tb["passed"], tb["runs"])
+            print(f"{'  95% interval':<22} {ca:>16} {cb:>16}")
 
 
 def main(argv: list[str] | None = None) -> int:

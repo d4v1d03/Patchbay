@@ -3,12 +3,13 @@
 
 x-app: &app
   build: .
+  restart: unless-stopped
   env_file:
     - path: .env
       required: false
   environment:
     REDIS_URL: redis://redis:6379/0
-    DATABASE_URL: sqlite:////app/data/dockhand.db
+    DATABASE_URL: sqlite:////app/data/patchbay.db
   volumes:
     - app-data:/app/data
   depends_on:
@@ -56,10 +57,14 @@ services:
 
   worker:
     <<: *app
-    command: ["celery", "-A", "dockhand.worker", "worker", "-l", "info", "--concurrency=2"]
+    command: ["celery", "-A", "patchbay.worker", "worker", "-l", "info", "--concurrency=2", "-Q", "runs,maintenance"]
     volumes:
       - app-data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
+
+  beat:
+    <<: *app
+    command: ["celery", "-A", "patchbay.worker", "beat", "-l", "info", "-s", "/app/data/beat-schedule"]
 
 volumes:
   redis-data:

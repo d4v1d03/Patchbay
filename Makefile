@@ -11,13 +11,16 @@ dev-redis:            ## start only redis (for local uv run development)
 	docker compose up -d redis
 
 web:                  ## run the FastAPI app with reload on :8000
-	uv run uvicorn dockhand.main:app --reload --port 8000
+	uv run uvicorn patchbay.main:app --reload --port 8000
 
-worker:               ## run a Celery worker
-	uv run celery -A dockhand.worker worker -l info
+worker:               ## run a Celery worker (runs + maintenance queues)
+	uv run celery -A patchbay.worker worker -l info -Q runs,maintenance
+
+beat:                 ## run the periodic scheduler (reaper, sweeper)
+	uv run celery -A patchbay.worker beat -l info
 
 build-sandbox:        ## build the sandbox image agents run in
-	docker build -t dockhand-sandbox:latest sandbox/
+	docker build -t patchbay-sandbox:latest sandbox/
 
 test:                 ## unit tests (no Docker needed)
 	uv run pytest tests/unit -q
@@ -37,5 +40,5 @@ up:                   ## full stack via compose (http://localhost:8088)
 down:                 ## stop the stack
 	docker compose down
 
-clean-sandboxes:      ## remove every sandbox container dockhand created
-	docker ps -aq --filter label=dockhand.session | xargs -r docker rm -f
+clean-sandboxes:      ## remove every sandbox container patchbay created
+	docker ps -aq --filter label=patchbay.session | xargs -r docker rm -f

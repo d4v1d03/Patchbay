@@ -1,6 +1,4 @@
-"""Behavioural tests for run_agent against FakeLLM + FakeSandbox."""
-
-from dockhand.agent.loop import (
+from patchbay.agent.loop import (
     EV_ASK_USER,
     EV_ERROR,
     EV_MESSAGE,
@@ -10,9 +8,9 @@ from dockhand.agent.loop import (
     Limits,
     run_agent,
 )
-from dockhand.agent.tools import default_registry
-from dockhand.llm import FakeLLM, system_message, user_message
-from dockhand.sandbox import FakeSandbox
+from patchbay.agent.tools import default_registry
+from patchbay.llm import FakeLLM, system_message, user_message
+from patchbay.sandbox import FakeSandbox
 
 
 class Recorder:
@@ -155,3 +153,135 @@ def test_multiple_tool_calls_in_one_turn_run_in_order():
     assert (EV_MESSAGE, {"content": "doing both"}) in rec.events
     assert_transcript_valid(transcript)
     assert outcome.steps == 2
+
+
+def test_session_token_budget_stops_the_run():
+    llm = FakeLLM.script(*[FakeLLM.tool_call("bash", command="ls")] * 5)  # 15 tokens per turn
+    outcome, transcript, rec = run(
+        llm, limits=Limits(max_steps=10, max_session_tokens=40, tokens_used=20)
+    )
+    # 20+15 = 35 after step 1; step 2 is paid for, so its calls run (50); step 3 never starts
+    assert outcome.status == "failed" and outcome.steps == 2
+    assert "token budget" in outcome.error
+    assert_transcript_valid(transcript)
+    assert any(k == EV_ERROR for k, _ in rec.events)
+
+
+def test_the_turn_that_crosses_the_budget_can_still_finish():
+    llm = FakeLLM.script(FakeLLM.tool_call("finish", summary="done"))
+    outcome, _, _ = run(llm, limits=Limits(max_steps=10, max_session_tokens=30, tokens_used=20))
+    assert outcome.status == "completed" and outcome.summary == "done"
+
+
+def test_cached_tokens_count_a_tenth_against_the_budget():
+    from patchbay.llm.types import Usage
+
+    # the session that hit the old limit: 405k prompt (385k cached) + 9k out
+    assert Usage(405_474, 8_778, 385_536).budget_tokens == 19_938 + 8_778 + 38_553
+    assert Usage(100, 20).budget_tokens == 120
+
+
+def test_budget_zero_means_unlimited():
+    llm = FakeLLM.script(FakeLLM.tool_call("finish", summary="ok"))
+    outcome, _, _ = run(llm, limits=Limits(max_session_tokens=0, tokens_used=10**9))
+    assert outcome.status == "completed"
+
+
+# ---- crash repair ---------------------------------------------------------------------
+
+
+def _asst(*ids):
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {"id": i, "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+            for i in ids
+        ],
+    }
+
+
+def test_repair_answers_calls_left_dangling_by_a_crash():
+    from patchbay.agent.loop import INTERRUPTED_NOTE, repair_transcript
+
+    t = [
+        system_message("s"),
+        user_message("u"),
+        _asst("a"),
+        {"role": "tool", "tool_call_id": "a", "content": "ok"},
+        _asst("b", "c"),
+        {"role": "tool", "tool_call_id": "b", "content": "ok"},
+    ]
+    added = repair_transcript(t)
+    assert [m["tool_call_id"] for m in added] == ["c"]  # only the unanswered one
+    assert t[-1] == {"role": "tool", "tool_call_id": "c", "content": INTERRUPTED_NOTE}
+    assert_transcript_valid(t)
+    assert repair_transcript(t) == []  # idempotent
+
+
+def test_repair_is_a_noop_on_clean_transcripts():
+    from patchbay.agent.loop import repair_transcript
+
+    assert repair_transcript([system_message("s"), user_message("u")]) == []
+    t = [
+        system_message("s"),
+        user_message("u"),
+        _asst("a"),
+        {"role": "tool", "tool_call_id": "a", "content": "ok"},
+    ]
+    assert repair_transcript(t) == [] and len(t) == 4
+
+
+def test_agent_package_has_no_infrastructure_imports():
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, patchbay.agent.loop, patchbay.agent.tools, patchbay.agent.prompts\n"
+        "infra = ('sqlalchemy', 'redis', 'celery', 'patchbay.events.bus', 'patchbay.jobs')\n"
+        "bad = [m for m in infra if m in sys.modules]\n"
+        "assert not bad, bad"
+    )
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_context_manager_thins_what_the_model_sees_not_the_transcript():
+    from patchbay.agent.context import ContextManager, ContextPolicy
+    from patchbay.events import EV_CONTEXT
+
+    big = "x" * 4000
+    sb = FakeSandbox(responses={"cat": big})
+    llm = FakeLLM.script(
+        *[FakeLLM.tool_call("bash", command=f"cat f{i}") for i in range(6)],
+        FakeLLM.tool_call("finish", summary="done"),
+    )
+    ctx = ContextManager(ContextPolicy(budget_tokens=2500, keep_recent_turns=2))
+    outcome, transcript, rec = run(llm, sb, context=ctx)
+    assert outcome.status == "completed"
+
+    # the stored transcript kept every output in full
+    tool_msgs = [m for m in transcript if m["role"] == "tool"][:6]
+    assert all(big in m["content"] for m in tool_msgs)
+    # ...while a later request to the model carried stubs for the old ones
+    last_request = llm.requests[-1]["messages"]
+    assert any("chars elided" in (m.get("content") or "") for m in last_request)
+    assert any(k == EV_CONTEXT for k, _ in rec.events)
+    assert_transcript_valid(last_request)
+
+
+def test_prompt_layouts_legacy_vs_static_system_prompt():
+    """v0/v1 put session details in the system prompt; v2 keeps it static and
+    puts them in the first user message, so a new session shares the whole
+    system prompt + tool definitions prefix with every other session."""
+    from patchbay.agent.prompts import build_initial_messages
+
+    a = build_initial_messages(task="do X", tree="./a.py", repo_url="https://x/y", version="v1")
+    b = build_initial_messages(task="do Y", tree="./b.py", repo_url=None, version="v1")
+    assert a[0]["content"] != b[0]["content"] and a[1]["content"] == "do X"
+
+    a = build_initial_messages(task="do X", tree="./a.py", repo_url="https://x/y", version="v2")
+    b = build_initial_messages(task="do Y", tree="./b.py", repo_url=None, version="v2")
+    assert a[0] == b[0]  # byte-identical system prompt across sessions
+    assert "./a.py" in a[1]["content"] and a[1]["content"].endswith("## Task\ndo X")
+    assert "cloned from https://x/y" in a[1]["content"] and "./b.py" in b[1]["content"]

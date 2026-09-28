@@ -12,8 +12,8 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-COPY dockhand ./dockhand
+COPY patchbay ./patchbay
 
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8000
-CMD ["uvicorn", "dockhand.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "patchbay.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,9 +1,6 @@
-"""Smoke tests for the web skeleton. No Redis or Docker required: the
-dependency checks are monkeypatched so the tests are about the app's wiring."""
-
 from fastapi.testclient import TestClient
 
-from dockhand import main
+from patchbay import main
 
 
 def make_client() -> TestClient:

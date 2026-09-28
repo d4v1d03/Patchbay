@@ -1,10 +1,11 @@
-"""Run the agent on the eval tasks and record what happened.
+"""Run the agent on the eval tasks.
 
-    uv run python evals/run.py --trials 1 --tag baseline
+    uv run python evals/run.py --trials 3 --tag baseline
     uv run python evals/run.py --tasks csv_to_json,word_freq --prompt v1 --tag v1
-    uv run python evals/run.py --models gemini-3.6-flash,gemini-3.8-flash   # round-robin
+    uv run python evals/run.py --thinking off --tag no-thinking
+    uv run python evals/run.py --verify 2 --tag reviewed
 
-Results land in evals/results/<timestamp>-<tag>.json (and latest.json).
+Results go to evals/results/<timestamp>-<tag>.json and latest.json.
 """
 
 from __future__ import annotations
@@ -14,26 +15,23 @@ import json
 import secrets
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from dockhand.agent.loop import EV_TOOL_CALL, EV_USAGE, Limits, run_agent  # noqa: E402
-from dockhand.agent.prompts import (  # noqa: E402
-    SYSTEM_PROMPT_VERSION,
-    build_system_prompt,
-    workspace_tree,
-)
-from dockhand.agent.tools import default_registry  # noqa: E402
-from dockhand.config import get_settings  # noqa: E402
-from dockhand.llm.client import OpenAICompatibleClient  # noqa: E402
-from dockhand.llm.trace import TraceWriter, new_run_id  # noqa: E402
-from dockhand.llm.types import system_message, user_message  # noqa: E402
-from dockhand.sandbox import Sandbox  # noqa: E402
 from evals.prices import cost_usd  # noqa: E402
 from evals.tasks import Task, load_tasks  # noqa: E402
+from patchbay.agent import context as agent_context  # noqa: E402
+from patchbay.agent import verifier as agent_verifier  # noqa: E402
+from patchbay.agent.loop import EV_REVIEW, EV_TOOL_CALL, EV_USAGE, Limits, run_agent  # noqa: E402
+from patchbay.agent.prompts import build_initial_messages, workspace_tree  # noqa: E402
+from patchbay.agent.tools import default_registry  # noqa: E402
+from patchbay.config import get_settings  # noqa: E402
+from patchbay.llm.client import OpenAICompatibleClient  # noqa: E402
+from patchbay.llm.trace import TraceWriter, new_run_id  # noqa: E402
+from patchbay.sandbox import Sandbox  # noqa: E402
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
@@ -59,10 +57,20 @@ class RunResult:
     summary: str | None
     error: str | None
     infra_error: bool
+    thinking: str = ""
+    reasoning_tokens: int = 0
+    reviews: list[dict] = field(default_factory=list)
 
 
 def run_one(
-    task: Task, trial: int, model: str, prompt_version: str, max_steps: int | None
+    task: Task,
+    trial: int,
+    model: str,
+    prompt_version: str,
+    max_steps: int | None,
+    context_budget: int = 0,
+    thinking: str | None = None,
+    verify: int = 0,
 ) -> RunResult:
     run_id = new_run_id()
     trace = TraceWriter(run_id)
@@ -72,36 +80,45 @@ def run_one(
         api_key=settings.llm_api_key,
         model=model,
         temperature=settings.llm_temperature,
+        thinking=settings.llm_thinking if thinking is None else thinking,
         trace=trace,
     )
     tools = default_registry()
-    usage = {"prompt": 0, "completion": 0, "cached": 0}
+    usage = {"prompt": 0, "completion": 0, "cached": 0, "reasoning": 0}
     counters = {"tool_calls": 0}
+    reviews: list[dict] = []
 
     def emit(kind: str, payload: dict) -> None:
         if kind == EV_USAGE:
             usage["prompt"] += payload["prompt_tokens"]
             usage["completion"] += payload["completion_tokens"]
             usage["cached"] += payload["cached_tokens"]
+            usage["reasoning"] += payload.get("reasoning_tokens", 0)
         elif kind == EV_TOOL_CALL:
             counters["tool_calls"] += 1
+        elif kind == EV_REVIEW:
+            reviews.append(payload)
 
     t0 = time.monotonic()
     sandbox = Sandbox.create(f"eval-{secrets.token_hex(3)}", repo_url=task.repo_url)
     try:
-        for path, content in task.setup.items():
-            sandbox.write_file(path, content)
-        transcript = [
-            system_message(
-                build_system_prompt(
-                    tree=workspace_tree(sandbox), repo_url=task.repo_url, version=prompt_version
-                )
-            ),
-            user_message(task.prompt.strip()),
-        ]
+        task.seed(sandbox)
+        transcript = build_initial_messages(
+            task=task.prompt,
+            tree=workspace_tree(sandbox),
+            repo_url=task.repo_url,
+            version=prompt_version,
+        )
         limits = Limits(max_steps=max_steps or task.max_steps or settings.max_steps)
         outcome = run_agent(
-            llm=llm, sandbox=sandbox, transcript=transcript, tools=tools, emit=emit, limits=limits
+            llm=llm,
+            sandbox=sandbox,
+            transcript=transcript,
+            tools=tools,
+            emit=emit,
+            limits=limits,
+            context=agent_context.from_settings(context_budget),
+            verifier=agent_verifier.from_settings(llm, verify),
         )
 
         check_exit: int | None = None
@@ -135,6 +152,9 @@ def run_one(
         summary=outcome.summary or outcome.question,
         error=outcome.error,
         infra_error=bool(outcome.error and "LLM call failed" in outcome.error),
+        thinking=llm.thinking,
+        reasoning_tokens=usage["reasoning"],
+        reviews=reviews,
     )
 
 
@@ -143,16 +163,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tasks", help="comma-separated task names (default: all)")
     ap.add_argument("--trials", type=int, default=1)
     ap.add_argument("--tag", default="run")
-    ap.add_argument(
-        "--prompt", default=SYSTEM_PROMPT_VERSION, help="system prompt version, e.g. v1"
-    )
+    ap.add_argument("--prompt", help="system prompt version, e.g. v1 (default: PROMPT_VERSION)")
     ap.add_argument(
         "--models", help="comma-separated model ids, used round-robin (default: LLM_MODEL)"
     )
     ap.add_argument("--max-steps", type=int)
+    ap.add_argument(
+        "--context-budget", type=int, default=0, help="compact old tool outputs past N tokens"
+    )
+    ap.add_argument("--thinking", help="off | low | high | max (default: LLM_THINKING)")
+    ap.add_argument(
+        "--verify", type=int, default=0, metavar="N", help="review each finish, reject ≤ N times"
+    )
     args = ap.parse_args(argv)
 
     tasks = load_tasks(args.tasks.split(",") if args.tasks else None)
+    args.prompt = args.prompt or get_settings().prompt_version
     models = args.models.split(",") if args.models else [get_settings().llm_model]
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
@@ -166,7 +192,16 @@ def main(argv: list[str] | None = None) -> int:
             model = models[i % len(models)]
             i += 1
             print(f"[{i:>2}] {task.name} (trial {trial}, {model}) ... ", end="", flush=True)
-            r = run_one(task, trial, model, args.prompt, args.max_steps)
+            r = run_one(
+                task,
+                trial,
+                model,
+                args.prompt,
+                args.max_steps,
+                args.context_budget,
+                thinking=args.thinking,
+                verify=args.verify,
+            )
             results.append(r)
             mark = "PASS" if r.passed else ("ERR " if r.infra_error else "FAIL")
             cost = f"${r.cost_usd:.4f}" if r.cost_usd is not None else "n/a"
@@ -176,6 +211,9 @@ def main(argv: list[str] | None = None) -> int:
             payload = {
                 "tag": args.tag,
                 "prompt_version": args.prompt,
+                "context_budget": args.context_budget,
+                "thinking": args.thinking,
+                "verify": args.verify,
                 "models": models,
                 "started": stamp,
                 "results": [asdict(x) for x in results],

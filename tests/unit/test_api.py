@@ -1,15 +1,13 @@
-"""JSON API + SSE against a temp DB and fake Redis; the Celery enqueue is stubbed."""
-
 import json
 
 import pytest
 from fastapi.testclient import TestClient
 
-from dockhand import main
-from dockhand.db.engine import db_session
-from dockhand.db.models import Session
-from dockhand.events import EV_STATUS, EV_TOOL_CALL
-from dockhand.web import api
+from patchbay import main
+from patchbay.db.engine import db_session
+from patchbay.db.models import Message, Session
+from patchbay.events import EV_STATUS, EV_TOOL_CALL
+from patchbay.web import api
 
 
 @pytest.fixture
@@ -137,10 +135,10 @@ def test_pages_render(client):
 
 
 def test_trace_step_endpoint(client, tmp_path, monkeypatch):
-    from dockhand import trace as trace_mod
-    from dockhand.llm.demo import DemoLLM
-    from dockhand.llm.trace import TraceWriter
-    from dockhand.llm.types import system_message, user_message
+    from patchbay import trace as trace_mod
+    from patchbay.llm.demo import DemoLLM
+    from patchbay.llm.trace import TraceWriter
+    from patchbay.llm.types import system_message, user_message
 
     monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
     llm = DemoLLM(delay_s=0, trace=TraceWriter("run-x", tmp_path))
@@ -160,7 +158,7 @@ def test_trace_step_endpoint(client, tmp_path, monkeypatch):
 
 
 def test_diff_endpoint_prefers_live_container_then_stored_patch(client, monkeypatch):
-    from dockhand.web import api as api_mod
+    from patchbay.web import api as api_mod
 
     sid = client.post("/api/sessions", json={"prompt": "x"}).json()["id"]
     with db_session() as db:
@@ -191,3 +189,61 @@ def test_diff_endpoint_prefers_live_container_then_stored_patch(client, monkeypa
     assert r.headers["content-disposition"] == f'attachment; filename="{sid}.patch"'
     assert r.text.startswith("diff --git")
     assert client.get("/api/sessions/s_nope/diff").status_code == 404
+
+
+def test_project_zip_download(client, projects_dir):
+    sid = client.post("/api/sessions", json={"prompt": "zip it"}).json()["id"]
+    assert client.get(f"/sessions/{sid}/project.zip").status_code == 404
+    assert 'id="project"' in client.get(f"/sessions/{sid}").text  # rendered, hidden
+    projects_dir.mkdir(parents=True)
+    (projects_dir / f"{sid}.zip").write_bytes(b"PK\x05\x06" + b"\0" * 18)
+    r = client.get(f"/sessions/{sid}/project.zip")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
+    assert f'filename="{sid}.zip"' in r.headers["content-disposition"]
+
+
+def test_delete_session_removes_rows_stream_and_traces(client, tmp_path, monkeypatch):
+    from patchbay import trace as trace_mod
+    from patchbay.web import api as api_mod
+
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    destroyed = []
+    monkeypatch.setattr(api_mod, "destroy_container", destroyed.append)
+
+    sid = client.post("/api/sessions", json={"prompt": "bye"}).json()["id"]
+    (tmp_path / "run-1.jsonl").write_text("{}\n")
+    with db_session() as db:
+        s = db.get(Session, sid)
+        s.status, s.container_id, s.last_run_id = "completed", "cid-9", "run-1"
+        db.add(
+            Message(session_id=sid, seq=0, role="user", payload={"role": "user", "content": "bye"})
+        )
+    client.bus.publish(sid, "llm.usage", {"run_id": "run-1", "step": 1})
+
+    assert client.delete(f"/api/sessions/{sid}").status_code == 204
+    assert client.get(f"/api/sessions/{sid}").status_code == 404
+    with db_session() as db:
+        assert db.query(Message).filter(Message.session_id == sid).count() == 0
+    assert client.bus.replay(sid) == [] and not client.bus.redis.exists(f"session:{sid}:events")
+    assert destroyed == ["cid-9"] and not (tmp_path / "run-1.jsonl").exists()
+    assert not (tmp_path / "projects" / f"{sid}.zip").exists()
+
+    sid2 = client.post("/api/sessions", json={"prompt": "busy"}).json()["id"]
+    with db_session() as db:
+        db.get(Session, sid2).status = "running"
+    assert client.delete(f"/api/sessions/{sid2}").status_code == 409
+    assert client.delete("/api/sessions/s_nope").status_code == 404
+
+
+def test_live_diff_tolerates_no_docker(monkeypatch):
+    """web may run without a docker socket (compose): any docker failure → stored patch."""
+    from patchbay.web import api as api_mod
+
+    class Boom:
+        @staticmethod
+        def attach(cid):
+            raise RuntimeError("Error while fetching server API version")
+
+    monkeypatch.setattr(api_mod, "Sandbox", Boom)
+    assert api_mod._live_diff("cid") is None
+    api_mod.destroy_container("cid")  # must not raise

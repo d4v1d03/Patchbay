@@ -308,3 +308,190 @@ Nothing outside `llm/` knows which provider is in use.
 **Consequences.** Adding a provider is a change to one file. Transcripts
 stored in the database carry the extras, so follow-ups remain valid across
 providers that require them.
+
+---
+
+## ADR-018 · Short leases with a heartbeat; repair the transcript on resume
+
+**Context.** Killing a worker mid-run showed three problems. The run lease was
+4 hours, so the sweeper left the orphaned session alone for 4 hours. A crash
+between saving an assistant's tool call and saving its result left an
+unanswered call in the stored transcript, which OpenAI-compatible providers
+reject. Usage was added to the session only at the end of a run, so a crash
+lost it — including from the token budget.
+
+**Decision.** Leases are 90 s and renewed every 30 s by a thread that lives as
+long as the run; a dead worker's lease expires on its own. On resume,
+unanswered tool calls at the tail of the transcript get an explicit
+"interrupted — check before retrying" result. Usage and step counts are added
+to the session per turn. Runs ignore deliveries for sessions not in `queued` or
+`running`. Containers have `restart: unless-stopped`.
+
+**Alternatives.** Rely on Celery redelivery alone — the visibility timeout has
+to exceed the longest run, so recovery would take hours. Drop the unanswered
+call instead of answering it — hides from the model that a side effect may
+already have happened.
+
+**Consequences.** A dead worker's session resumes within about
+`LEASE_TTL_S + MAINTENANCE_INTERVAL_S`, continues rather than restarts, and
+spend is never lost. One Redis `EXPIRE` every 30 s per active run.
+
+---
+
+## ADR-019 · The agent package stays free of infrastructure
+
+**Context.** The session runner and the maintenance jobs lived in `agent/`
+next to the loop, and the event constants were re-exported from a package
+whose `__init__` imported the Redis-backed bus — so importing the "pure" loop
+loaded SQLAlchemy, Redis and the database layer.
+
+**Decision.** Two packages with one direction of dependency. `agent/` holds
+the loop, tools, prompts and the standalone CLI and imports nothing from
+`db`, `events.bus`, `jobs` or Celery. `jobs/` holds the runner, maintenance
+and the enqueue helper, and may import anything below it. `events/` exports
+only the event-name constants; the bus is imported from `events.bus`.
+`web` starts runs through `jobs.queue`, so `jobs` never imports `web`.
+
+**Consequences.** The agent can be embedded, tested or evaluated without a
+database or broker. A check for this is one line: import `patchbay.agent.loop`
+and assert `sqlalchemy` and `redis` are not in `sys.modules`.
+
+---
+
+## ADR-020 · Static system prompt; session details in the first user message
+
+**Context.** Providers bill a repeated prompt prefix at a fraction of the price
+(DeepSeek: 2%). The tool definitions are serialised after the system prompt, so
+a system prompt that contains the repository, network setting and file tree
+differs per session and stops even the tools from being shared.
+
+**Decision.** From prompt v2 the system prompt is byte-identical for every
+session; the per-session block (`session_v2.md`) is prepended to the first user
+message. The block is descriptive, not imperative.
+
+**Alternatives.** Keep the layout and accept no cross-session caching; put
+session details at the end of the system prompt (measured: 20% cached).
+
+**Consequences.** 88% of a new session's first request is served from the
+provider's cache (was 0%). Pass rate indistinguishable from v1 at the sample
+sizes measured. See `docs/EVALS.md`.
+
+---
+
+## ADR-021 · Context compaction exists but is off by default
+
+**Context.** Resending the whole conversation every step makes prompts grow.
+Observation masking (stubbing old tool outputs) shrinks them, but rewrites the
+middle of the prompt, which breaks the provider's prefix cache, and hides
+content the model may need again.
+
+**Decision.** Implement masking with hysteresis (compact at the budget, down to
+half of it; stubs byte-stable) behind `CONTEXT_BUDGET_TOKENS`, default 0.
+
+**Alternatives.** On by default — measured on the long eval task: a 3k budget
+raised cost 47% (re-reads of elided files, cache hit 86% → 77%) and a 5k
+budget made no measurable difference. LLM summarisation — an extra call per
+compaction that still breaks the cache.
+
+**Consequences.** At the context sizes this agent reaches (≤ ~25k tokens
+against a 1M window) the cheapest option is to send everything and let the
+cache absorb it. Compaction is available for long sessions, small-context
+models or providers without cheap caching.
+
+---
+
+## ADR-022 · Model routing and provider fallback live outside the agent
+
+**Context.** Different calls could go to different models (a cheap one for
+reviews, a strong one for the loop), and a provider outage or exhausted quota
+currently fails the run.
+
+**Decision.** Patchbay talks to one OpenAI-compatible endpoint
+(`LLM_BASE_URL`). Choosing a model per request and failing over between
+providers belong in a gateway in front of it, which Patchbay then uses by
+pointing `LLM_BASE_URL` at it. Inside Patchbay, every call uses the configured
+model, including the reviewer's.
+
+**Alternatives.** A fallback wrapper and per-role model settings in
+`llm/client.py`: less to deploy, but routing policy would then live in each
+application that calls models, and mid-transcript provider switches need
+provider-specific handling (signed tool calls, reasoning fields) that a
+gateway handles once.
+
+**Consequences.** No failover today: a provider outage fails the run with a
+clear `LLM call failed` error, and the run can be retried by sending a
+follow-up.
+
+---
+
+## ADR-023 · A reviewer before `finish`, off by default
+
+**Context.** The agent decides for itself when it is done, and its own tests
+are the only check. A second opinion before the run is accepted could catch
+work that is wrong while its tests pass.
+
+**Decision.** `agent/verifier.py`: one extra model call (no tools, its own
+prompt, JSON mode validated with pydantic) sees the request, the summary, the
+diff and the last command's output, and returns `{approve, issues}`. A
+rejection goes back to the agent and the run continues; after
+`VERIFY_ROUNDS` rejections the next ending is accepted, and a failed review
+lets the ending stand. `VERIFY_ROUNDS=0` by default.
+
+**Alternatives.** Let the reviewer run commands (an agent reviewing an
+agent): catches behaviour it can't see in a diff, at several times the cost.
+A plan step before the loop: this suite is too easy to show whether planning
+helps. Review with the hidden tests: they don't exist outside evals.
+
+**Consequences.** Measured (docs/EVALS.md): no wrong rejections of correct
+work (42/42 approved), every planted bug the hidden tests confirm rejected
+(20/20, 11 visible only in the diff); in the loop +74% cost with nothing to
+catch on this suite. Off until a workload with weaker tests shows a benefit.
+
+---
+
+## ADR-024 · Diffs are taken against where the session started
+
+**Context.** The diff (shown in the UI, saved as the session's patch, and
+given to the reviewer) was `git diff` against the index, so anything the
+agent committed disappeared from it.
+
+**Decision.** At workspace creation, `refs/patchbay/base` points at the
+cloned `HEAD`, or at git's empty tree for an empty workspace; diffs are taken
+against it. A ref rather than a tag or commit, so it doesn't show in the
+agent's `git log`.
+
+**Alternatives.** Forbid commits in the prompt (the agent might commit
+anyway); snapshot the files at start (duplicates what git already does).
+
+**Consequences.** The patch is everything since the session started,
+committed or not. Sandboxes created before the change have no ref and fall
+back to `HEAD`.
+
+The first version staged new files in the agent's own index (`git add -N`).
+A test run showed two problems: the agent's `git status` listed every file as
+added, and a build directory seen before the agent wrote `.gitignore` stayed
+in the patch for good. Diffs now use a private index, reset to the base on
+every call.
+
+---
+
+## ADR-025 · The project download is a zip file on the data volume
+
+**Context.** The patch is the right format for applying changes to a repo you
+already have, but for a project built from nothing it's the wrong thing to
+hand over: a text diff, mostly lockfile and build output.
+
+**Decision.** When a run ends, the worker exports the workspace with
+`git archive` from the same private index the diff uses, so `.gitignore`
+applies and `node_modules` and `.git` are left out, and writes it to
+`data/projects/<session>.zip` (atomically, via a temp file). `web` serves the
+file; it has no Docker access, so it can't build the zip itself.
+
+**Alternatives.** Build the zip on request from the live container: needs
+Docker access in `web` and fails once the sandbox is reaped. Store it in
+SQLite: a few hundred KB per run in a row that every session query would
+otherwise not need.
+
+**Consequences.** The download reflects the end of the last run, not a run in
+progress. Zips over 50 MB are skipped with a warning. Deleting a session
+deletes its zip.

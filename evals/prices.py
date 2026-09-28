@@ -1,9 +1,14 @@
-"""USD per million tokens: (input, output, cached input). Substring-matched on
-the model id; unknown models get no cost. Update when providers change prices."""
+"""USD per million tokens: (input, output, cached input), matched by substring
+on the model id.
+
+DeepSeek charges about 2x in peak hours (01–04 and 06–10 UTC, weekdays). These
+are off-peak prices, so runs compare regardless of when they ran.
+"""
 
 PRICES = {
-    "deepseek-chat": (0.27, 1.10, 0.07),
-    "deepseek-reasoner": (0.55, 2.19, 0.14),
+    "deepseek-v4-pro": (0.66, 1.98, 0.022),
+    "deepseek-flash": (0.15, 0.60, 0.003),
+    "deepseek-chat": (0.15, 0.60, 0.003),  # legacy alias; responses report deepseek-flash
     "qwen3-coder": (1.00, 5.00, 0.20),
     "kimi-k2": (0.60, 2.50, 0.15),
     "glm-4.6": (0.60, 2.20, 0.11),

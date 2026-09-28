@@ -21,8 +21,8 @@ RUN userdel -r node \
     && useradd --create-home --uid 1000 --shell /bin/bash agent \
     && mkdir -p /workspace && chown agent:agent /workspace
 
-RUN git config --system user.name "dockhand" \
-    && git config --system user.email "dockhand@localhost" \
+RUN git config --system user.name "patchbay" \
+    && git config --system user.email "patchbay@localhost" \
     && git config --system init.defaultBranch main \
     && git config --system --add safe.directory '*'
 

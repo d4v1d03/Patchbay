@@ -1,14 +1,12 @@
-"""Every tool against FakeSandbox, plus the registry's guarantees."""
-
-from dockhand.agent.tools import (
+from patchbay.agent.tools import (
     BashTool,
     ReadFileTool,
     ToolRegistry,
     default_registry,
     truncate_middle,
 )
-from dockhand.llm.types import ToolCall
-from dockhand.sandbox import ExecResult, FakeSandbox
+from patchbay.llm.types import ToolCall
+from patchbay.sandbox import ExecResult, FakeSandbox
 
 
 def call(name, **args):

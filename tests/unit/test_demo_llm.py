@@ -1,8 +1,8 @@
-from dockhand.agent.loop import run_agent
-from dockhand.agent.tools import default_registry
-from dockhand.llm.demo import DemoLLM
-from dockhand.llm.types import system_message, user_message
-from dockhand.sandbox import FakeSandbox
+from patchbay.agent.loop import run_agent
+from patchbay.agent.tools import default_registry
+from patchbay.llm.demo import DemoLLM
+from patchbay.llm.types import system_message, user_message
+from patchbay.sandbox import FakeSandbox
 
 
 def _run(prompt, extra=()):
